@@ -19,10 +19,7 @@ android {
         compose = true
     }
 
-    kotlinOptions {
-        jvmTarget = "21"
-    }
-
+    // jvmTarget intentionally not set here: AGP 9.x built-in Kotlin derives it from compileOptions.targetCompatibility below
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
