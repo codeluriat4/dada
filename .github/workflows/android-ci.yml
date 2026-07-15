@@ -1,4 +1,4 @@
-name: Android Pre-Build Verification
+name: Android Full Diagnostic CI
 
 on:
   push:
@@ -7,55 +7,181 @@ on:
     branches: [ main, develop ]
 
 jobs:
-  verify:
-    name: Run Verification Gates
+  diagnostics:
+    name: Full Diagnostics Pipeline
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout Code Base
+
+      # -------------------------------
+      # 1. Checkout Repository
+      # -------------------------------
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Set Up Java 21
+      # -------------------------------
+      # 2. Setup Java (JVM 21)
+      # -------------------------------
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
-          java-version: '21'
+          distribution: zulu
+          java-version: 21
 
-      # Gradle 9.4.1 setup using the official GitHub action
-      - name: Set Up Gradle 9.4.1
+      # -------------------------------
+      # 3. Setup Gradle (with cache)
+      # -------------------------------
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 9.4.1
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Grant Execute Permission to Gradle Wrapper
-        run: chmod +x gradlew
+      # -------------------------------
+      # 4. Prepare Workspace
+      # -------------------------------
+      - name: Prepare environment
+        run: |
+          chmod +x gradlew
+          mkdir -p diagnostics/raw
+          mkdir -p diagnostics/reports
 
-      # Forces resolution of the AGP 9.2 dependency graph to catch dynamic version errors or hallucinations early
-      - name: Validate Gradle Dependencies
-        run: ./gradlew dependencies --no-daemon
+      # -------------------------------
+      # 5. Capture Environment Snapshot
+      # -------------------------------
+      - name: Capture environment
+        run: |
+          echo "Collecting environment info..."
 
-      # Runs formatting/style checks if Spotless or ktlint plugins are present
-      - name: Check Code Formatting
-        run: ./gradlew spotlessCheck --continue --no-daemon || ./gradlew ktlintCheck --continue --no-daemon || echo "Formatting check skipped (Plugins not configured)"
+          echo "JAVA VERSION:" > diagnostics/environment.txt
+          java -version >> diagnostics/environment.txt 2>&1
 
-      # Runs platform static analysis. Generates unified HTML test/lint dashboards supported by AGP 9.2
-      - name: Run Android Lint and Detekt
-        run: ./gradlew lintDebug detekt --continue --no-daemon
+          echo "" >> diagnostics/environment.txt
+          echo "GRADLE VERSION:" >> diagnostics/environment.txt
+          ./gradlew -v >> diagnostics/environment.txt 2>&1
 
-      # Verifies application logic with local JVM unit tests
-      - name: Run Local JVM Unit Tests
-        run: ./gradlew testDebugUnitTest --no-daemon
+          echo "" >> diagnostics/environment.txt
+          echo "SYSTEM INFO:" >> diagnostics/environment.txt
+          uname -a >> diagnostics/environment.txt
 
-      # Upload verification results if any step fails so you can debug the AI failures
-      - name: Upload Verification Reports
-        if: failure()
+      # -------------------------------
+      # 6. Dependency Resolution
+      # -------------------------------
+      - name: Resolve dependencies
+        run: |
+          ./gradlew dependencies \
+            --no-daemon \
+            --stacktrace \
+            --info \
+            > diagnostics/raw/dependencies.log 2>&1 || true
+
+      # -------------------------------
+      # 7. Formatting Check
+      # -------------------------------
+      - name: Formatting check
+        run: |
+          (./gradlew spotlessCheck || ./gradlew ktlintCheck) \
+            --no-daemon \
+            --stacktrace \
+            --info \
+            > diagnostics/raw/formatting.log 2>&1 || true
+
+      # -------------------------------
+      # 8. Static Analysis (Lint + Detekt)
+      # -------------------------------
+      - name: Static analysis
+        run: |
+          ./gradlew lintDebug detekt \
+            --no-daemon \
+            --stacktrace \
+            --info \
+            > diagnostics/raw/static-analysis.log 2>&1 || true
+
+      # -------------------------------
+      # 9. Unit Tests
+      # -------------------------------
+      - name: Run unit tests
+        run: |
+          ./gradlew testDebugUnitTest \
+            --no-daemon \
+            --stacktrace \
+            --info \
+            > diagnostics/raw/tests.log 2>&1 || true
+
+      # -------------------------------
+      # 10. FULL BUILD (Critical)
+      # -------------------------------
+      - name: Build debug APK
+        run: |
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --info \
+            > diagnostics/raw/build.log 2>&1 || true
+
+      # -------------------------------
+      # 11. Collect Structured Reports
+      # -------------------------------
+      - name: Collect reports
+        run: |
+          echo "Collecting reports..."
+
+          find . -type f -path "*/build/reports/lint-results*.xml" \
+            -exec cp {} diagnostics/reports/ \; || true
+
+          find . -type d -path "*/build/reports/detekt" \
+            -exec cp -r {} diagnostics/reports/ \; || true
+
+          find . -type d -path "*/build/test-results" \
+            -exec cp -r {} diagnostics/reports/ \; || true
+
+      # -------------------------------
+      # 12. Generate Agent Summary (CRITICAL)
+      # -------------------------------
+      - name: Generate summary
+        run: |
+          echo "# CI Diagnostic Summary" > diagnostics/summary.md
+
+          echo "## Project Context" >> diagnostics/summary.md
+          echo "- Android Kotlin + Jetpack Compose" >> diagnostics/summary.md
+          echo "- JVM Target: 21" >> diagnostics/summary.md
+          echo "" >> diagnostics/summary.md
+
+          echo "## Executed Stages" >> diagnostics/summary.md
+          echo "- Dependency Resolution" >> diagnostics/summary.md
+          echo "- Formatting Check" >> diagnostics/summary.md
+          echo "- Static Analysis (Lint + Detekt)" >> diagnostics/summary.md
+          echo "- Unit Tests" >> diagnostics/summary.md
+          echo "- Debug Build (assembleDebug)" >> diagnostics/summary.md
+          echo "" >> diagnostics/summary.md
+
+          echo "## Log Files" >> diagnostics/summary.md
+          echo "- raw/dependencies.log" >> diagnostics/summary.md
+          echo "- raw/formatting.log" >> diagnostics/summary.md
+          echo "- raw/static-analysis.log" >> diagnostics/summary.md
+          echo "- raw/tests.log" >> diagnostics/summary.md
+          echo "- raw/build.log" >> diagnostics/summary.md
+          echo "" >> diagnostics/summary.md
+
+          echo "## Reports" >> diagnostics/summary.md
+          echo "- Lint XML reports" >> diagnostics/summary.md
+          echo "- Detekt reports" >> diagnostics/summary.md
+          echo "- Unit test reports" >> diagnostics/summary.md
+          echo "" >> diagnostics/summary.md
+
+          echo "## Notes for Agent" >> diagnostics/summary.md
+          echo "- Parse build.log first for fatal errors" >> diagnostics/summary.md
+          echo "- Cross-check dependencies.log for version conflicts" >> diagnostics/summary.md
+          echo "- Use static-analysis.log for code quality issues" >> diagnostics/summary.md
+          echo "- Use test logs for logic failures" >> diagnostics/summary.md
+
+      # -------------------------------
+      # 13. Upload Diagnostic Bundle
+      # -------------------------------
+      - name: Upload diagnostics bundle
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: verification-reports
-          path: |
-            **/build/reports/lint-results*.xml
-            **/build/reports/detekt/
-            **/build/test-results/
-          if-no-files-found: ignore
+          name: android-diagnostics-bundle
+          path: diagnostics/
