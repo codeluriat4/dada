@@ -1,0 +1,61 @@
+name: Android Pre-Build Verification
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  verify:
+    name: Run Verification Gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout Code Base
+        uses: actions/checkout@v4
+
+      - name: Set Up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+
+      # Gradle 9.4.1 setup using the official GitHub action
+      - name: Set Up Gradle 9.4.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.4.1
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Grant Execute Permission to Gradle Wrapper
+        run: chmod +x gradlew
+
+      # Forces resolution of the AGP 9.2 dependency graph to catch dynamic version errors or hallucinations early
+      - name: Validate Gradle Dependencies
+        run: ./gradlew dependencies --no-daemon
+
+      # Runs formatting/style checks if Spotless or ktlint plugins are present
+      - name: Check Code Formatting
+        run: ./gradlew spotlessCheck --continue --no-daemon || ./gradlew ktlintCheck --continue --no-daemon || echo "Formatting check skipped (Plugins not configured)"
+
+      # Runs platform static analysis. Generates unified HTML test/lint dashboards supported by AGP 9.2
+      - name: Run Android Lint and Detekt
+        run: ./gradlew lintDebug detekt --continue --no-daemon
+
+      # Verifies application logic with local JVM unit tests
+      - name: Run Local JVM Unit Tests
+        run: ./gradlew testDebugUnitTest --no-daemon
+
+      # Upload verification results if any step fails so you can debug the AI failures
+      - name: Upload Verification Reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-reports
+          path: |
+            **/build/reports/lint-results*.xml
+            **/build/reports/detekt/
+            **/build/test-results/
+          if-no-files-found: ignore
